@@ -37,8 +37,11 @@ export function applyXmlPatchPlan(pkg: OpcPackage, plan?: XmlPatchPlan): void {
     const part = pkg.parts.get(uri);
     if (!part?.xml) throw new Error(`Patch target is not an XML part: ${uri}`);
     const document = parseXml(part.xml);
-    for (const patch of patches) {
-      const target = findByElementPath(document, patch.path);
+    const resolvedPatches = patches.map((patch) => ({
+      patch,
+      target: findByElementPath(document, patch.path),
+    }));
+    for (const { patch, target } of resolvedPatches) {
       if (!target) {
         if (patch.op === "remove") continue;
         throw new Error(`XML patch target not found: ${uri}${patch.path}`);

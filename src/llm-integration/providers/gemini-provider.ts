@@ -3,6 +3,7 @@ import type { LlmGenerationRequest, LlmGenerationResult, LlmProvider } from "../
 import { parseStructuredOutput } from "../response-parser.js";
 import { recordLlmResponseBody } from "../response-recorder.js";
 import { templateOperationJsonSchema } from "../structured-output.js";
+import type { TemplateNode } from "../../llm-template/index.js";
 
 export const GEMINI_API_KEY_PLACEHOLDER = "YOUR_GEMINI_API_KEY";
 export interface GeminiProviderOptions {
@@ -38,7 +39,7 @@ export class Gemini35FlashProvider implements LlmProvider {
       throw new Error(
         "Gemini API key is not configured. Set GEMINI_API_KEY or pass apiKey to Gemini35FlashProvider.",
       );
-    const messages = buildOperationPrompt(request);
+    const messages = request.messages ?? buildOperationPrompt(request);
     const system = messages.find((message) => message.role === "system")?.content ?? "";
     const user = messages
       .filter((message) => message.role === "user")
@@ -55,7 +56,7 @@ export class Gemini35FlashProvider implements LlmProvider {
           generationConfig: {
             temperature: this.temperature,
             responseMimeType: "application/json",
-            responseJsonSchema: templateOperationJsonSchema,
+            responseJsonSchema: responseSchemaForRequest(request),
           },
         }),
       },
@@ -93,6 +94,58 @@ export class Gemini35FlashProvider implements LlmProvider {
       },
     };
   }
+}
+
+function responseSchemaForRequest(request: LlmGenerationRequest): unknown {
+  const schema = structuredClone(templateOperationJsonSchema) as unknown as {
+    properties: {
+      operations: {
+        items: {
+          oneOf: Array<{
+            properties: Record<string, Record<string, unknown>>;
+          }>;
+        };
+      };
+    };
+  };
+  const variants = schema.properties.operations.items.oneOf.filter((variant) =>
+    request.allowedOperations.includes(String(variant.properties.op?.const)),
+  );
+  schema.properties.operations.items.oneOf = variants;
+  if (request.allowedOperations.includes("appendCollectionItem")) {
+    const targetId = record(request.userInput)?.currentTargetId;
+    const target =
+      typeof targetId === "string" ? findTemplateNode(request.template.root, targetId) : undefined;
+    const itemSchema = record(target?.metadata)?.itemSchema;
+    if (Array.isArray(itemSchema)) {
+      const keys = itemSchema
+        .map((item) => record(item)?.key)
+        .filter((key): key is string => typeof key === "string");
+      const collectionVariant = variants.find(
+        (variant) => variant.properties.op?.const === "appendCollectionItem",
+      );
+      if (collectionVariant && keys.length) {
+        collectionVariant.properties.value = {
+          type: "object",
+          additionalProperties: false,
+          required: keys,
+          properties: Object.fromEntries(keys.map((key) => [key, { type: "string" }])),
+        };
+      }
+    }
+  }
+  return schema;
+}
+
+function findTemplateNode(node: TemplateNode, id: string): TemplateNode | undefined {
+  if (node.id === id) return node;
+  const children =
+    node.type === "container" ? node.children : node.type === "collection" ? node.items : [];
+  for (const child of children) {
+    const found = findTemplateNode(child, id);
+    if (found) return found;
+  }
+  return undefined;
 }
 
 export class GeminiApiError extends Error {

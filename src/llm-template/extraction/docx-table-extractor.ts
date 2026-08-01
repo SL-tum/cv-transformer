@@ -16,6 +16,7 @@ import type {
 } from "../model/template-node.js";
 import type { ExtractionDecision, ExtractionProposal } from "./candidate.js";
 import type { ExtractionResult } from "./extractor.js";
+import { findByElementPath, parseXml } from "../../ooxml/xml.js";
 
 /** Table-aware extraction. It never flattens cells into the surrounding paragraph stream. */
 export function mergeDocxTableExtraction(
@@ -28,7 +29,7 @@ export function mergeDocxTableExtraction(
   const visit = (blocks: FlowBlockNode[]) =>
     blocks.forEach((block) => {
       if (block.type === "table" && "rows" in block)
-        extractTable(block, result, existing, proposals, decisions);
+        extractTable(document, block, result, existing, proposals, decisions);
       else if (
         (block.type === "structuredDocumentTag" || block.type === "customXml") &&
         "blocks" in block
@@ -44,6 +45,7 @@ export function mergeDocxTableExtraction(
 }
 
 function extractTable(
+  document: RichDocument<FlowDocumentRoot>,
   table: TableNode,
   result: ExtractionResult,
   existing: Set<string>,
@@ -74,7 +76,7 @@ function extractTable(
         id,
         type: "collection",
         label,
-        editable: false,
+        editable: true,
         repeatable: true,
         items,
         prototypeId: `${id}-item`,
@@ -104,6 +106,7 @@ function extractTable(
               {
                 fieldId: slug(label),
                 markerId: slug(label),
+                cellIndex,
                 relativeSourceNodeIds: prototype.cells[cellIndex]
                   ? nodeIds(prototype.cells[cellIndex])
                   : [],
@@ -120,6 +123,11 @@ function extractTable(
                     role: "root",
                   },
                 ],
+              }
+            : {}),
+          ...(prototype.source?.xmlPath
+            ? {
+                nativeXml: sourceXml(document, prototype.source.partUri, prototype.source.xmlPath)!,
               }
             : {}),
         };
@@ -160,6 +168,12 @@ function extractTable(
       addDecision(proposals, decisions, id, "container", label, 0.9, [row.id]);
     }
   }
+}
+
+function sourceXml(document: RichDocument<FlowDocumentRoot>, partUri: string, xmlPath: string) {
+  const xml = document.nativeStore?.parts[partUri]?.xml;
+  if (!xml) return undefined;
+  return findByElementPath(parseXml(xml), xmlPath)?.toString();
 }
 
 function fullWidthLabel(row: TableRowNode, table: TableNode): string | undefined {

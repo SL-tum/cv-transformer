@@ -1,5 +1,29 @@
 node_modules/
 dist/
+
+# Local environment and secrets
 .env
 .env.local
+
+# Manual test inputs, generated Office files, candidate data, and LLM responses
 manual/
+outputs/
+
+# Test and coverage artifacts (keep the test/ source directory tracked)
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+junit.xml
+*.lcov
+
+# Runtime logs and saved model-response logs
+logs/
+*.log
+llm-responses/
+
+# Temporary and OS-generated files
+.DS_Store
+*.tmp
+*.temp
+tmp/

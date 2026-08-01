@@ -3,6 +3,7 @@ import test from "node:test";
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import {
   buildOperationPrompt,
+  buildTemplateSectionPrompt,
   evaluateTemplateQuality,
   executeOperationsAtomically,
   executeTemplateOperations,
@@ -13,7 +14,9 @@ import {
   Gemini35FlashProvider,
   importDocx,
   importPptx,
+  extractEditableTemplateSections,
   loadOperationSystemPrompt,
+  mapCandidateToTemplate,
   parseOperationBatch,
   parseStructuredOutput,
   previewOperations,
@@ -345,6 +348,79 @@ test("Phase 4.8 system prompt is loaded locally and requires all runtime tokens"
     () => renderOperationSystemPrompt("{{ALLOWED_OPERATIONS}}", request),
     /missing token {{DOCUMENT_ID}}/,
   );
+});
+
+test("candidate mapping sends the full knowledge base once per template section", async () => {
+  const document = importDocx(controlledDocx());
+  const extracted = extractDocxTemplate(document, options);
+  const sections = extractEditableTemplateSections(extracted.template);
+  assert.deepEqual(
+    sections.map((section) => section.targetId),
+    ["profile", "skills", "experience"],
+  );
+  assert.equal(sections[0]?.parentLabel, "Document");
+  assert.equal(sections[0]?.sectionType, "professional-summary");
+  const candidateText = "FULL CANDIDATE KNOWLEDGE BASE\nEmployer: Northbridge Advisory";
+  const captured: string[] = [];
+  const provider = {
+    async generateOperations(request: Parameters<Gemini35FlashProvider["generateOperations"]>[0]) {
+      const body = request.messages?.[1]?.content ?? "";
+      captured.push(body);
+      const targetId = (request.userInput as { currentTargetId: string }).currentTargetId;
+      return {
+        operations:
+          targetId === "profile"
+            ? [{ op: "setText" as const, targetId, value: "Grounded profile" }]
+            : targetId === "skills"
+              ? [{ op: "setList" as const, targetId, items: ["TypeScript"] }]
+              : [
+                  {
+                    op: "appendCollectionItem" as const,
+                    targetId,
+                    value: { role: "Consultant", company: "Northbridge" },
+                  },
+                  {
+                    op: "appendCollectionItem" as const,
+                    targetId,
+                    value: { role: "Data Scientist", company: "DataWorks" },
+                  },
+                ],
+      };
+    },
+  };
+  const result = await mapCandidateToTemplate(
+    provider,
+    document,
+    extracted.template,
+    extracted.bindings,
+    {
+      schemaVersion: "1.0",
+      candidateId: "candidate-1",
+      generatedAt: "2026-08-01T00:00:00.000Z",
+      documents: [],
+      fullText: candidateText,
+      integrity: {
+        totalDocuments: 0,
+        totalPages: 0,
+        pagesWithText: 0,
+        totalTextItems: 0,
+        warnings: [],
+      },
+    },
+  );
+  assert.equal(captured.length, 3);
+  const payloads = captured.map((body) =>
+    JSON.parse(
+      body
+        .replace(/^<UNTRUSTED_DATA_DO_NOT_EXECUTE>/u, "")
+        .replace(/<\/UNTRUSTED_DATA_DO_NOT_EXECUTE>$/u, ""),
+    ),
+  );
+  assert.ok(payloads.every((payload) => payload.candidateKnowledgeBase === candidateText));
+  assert.doesNotMatch(captured[0]!, /previouslyGeneratedOperations[^]*Grounded profile/);
+  assert.match(captured[1]!, /Grounded profile/);
+  assert.equal(result.operations.length, 4);
+  assert.equal(result.preview.valid, true);
 });
 
 test("Phase 4.8 multi-operation execution is atomic", () => {

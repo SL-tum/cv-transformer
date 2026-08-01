@@ -4,7 +4,12 @@ export interface LlmGenerationRequest {
   template: LlmTemplateDocument;
   userInput: unknown;
   allowedOperations: string[];
+  messages?: LlmPromptMessage[];
   context?: { language?: string; purpose?: string };
+}
+export interface LlmPromptMessage {
+  role: "system" | "user";
+  content: string;
 }
 export interface LlmGenerationResult {
   operations: TemplateOperation[];

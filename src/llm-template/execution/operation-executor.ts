@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { RichDocument } from "../../model/core/document.js";
 import type { DocumentRoot } from "../../model/core/document.js";
-import type { TextRunNode } from "../../model/text/index.js";
+import type { ParagraphNode, TextRunNode } from "../../model/text/index.js";
 import {
   addPatch,
   createPatchPlan,
@@ -12,6 +12,7 @@ import { attr, elementsByLocalName, findByElementPath, parseXml } from "../../oo
 import { indexRdtNodes } from "../markers/common.js";
 import { parseMarker } from "../markers/marker.js";
 import type { TemplateBindingMap } from "../bindings/binding-map.js";
+import type { PrototypeBinding } from "../bindings/binding.js";
 import { validateBindingMap, flatten } from "../bindings/binding-validator.js";
 import type { ConstraintWarning } from "../model/constraints.js";
 import type { LlmTemplateDocument } from "../model/template-document.js";
@@ -34,7 +35,7 @@ type InsertAfterPatch = { op: "insertAfter"; partUri: string; path: string; xml:
 interface RuntimeCollectionItem {
   patch: InsertAfterPatch;
   values: Record<string, string | string[]>;
-  prototypeXml: string;
+  prototype: PrototypeBinding;
 }
 const runtimeItems = new WeakMap<LlmTemplateDocument, Map<string, RuntimeCollectionItem>>();
 
@@ -189,10 +190,42 @@ function executeSetText(
   const runs = binding.sourceNodeIds
     .map((id) => nodes.get(id))
     .filter((node): node is TextRunNode => node?.type === "textRun" && "text" in node);
-  if (!runs.length) throw new Error(`Binding has no text runs: ${target.id}`);
+  removePptxParagraphBreaks(document, runs);
+  if (!runs.length) {
+    const paragraph = binding.sourceNodeIds
+      .map((id) => nodes.get(id))
+      .find((node): node is ParagraphNode => node?.type === "paragraph" && "runs" in node);
+    if (document.format === "docx" && paragraph?.source?.xmlPath) {
+      insertTextIntoEmptyDocxParagraph(document, paragraph, value);
+      (target as TextNode).value = value;
+      return;
+    }
+    throw new Error(`Binding has no text runs: ${target.id}`);
+  }
   runs[0]!.text = value;
   for (const run of runs.slice(1)) run.text = "";
   (target as TextNode).value = value;
+}
+
+function insertTextIntoEmptyDocxParagraph(
+  document: RichDocument<DocumentRoot>,
+  paragraph: ParagraphNode,
+  value: string,
+): void {
+  if (!paragraph.source?.xmlPath) throw new Error("Blank paragraph has no source location");
+  const preserveSpace = /^\s|\s$/.test(value) ? ' xml:space="preserve"' : "";
+  addPatch((document.patchPlan ??= createPatchPlan()), {
+    op: "appendChild",
+    partUri: paragraph.source.partUri,
+    path: paragraph.source.xmlPath,
+    xml: `<w:r><w:t${preserveSpace}>${escapeXml(value)}</w:t></w:r>`,
+  });
+  paragraph.runs.push({
+    id: `text_${randomUUID()}`,
+    type: "textRun",
+    text: value,
+    properties: {},
+  });
 }
 function executeSetList(
   document: RichDocument<DocumentRoot>,
@@ -214,6 +247,7 @@ function executeSetList(
   const runs = binding.sourceNodeIds
     .map((id) => nodes.get(id))
     .filter((node): node is TextRunNode => node?.type === "textRun" && "text" in node);
+  removePptxParagraphBreaks(document, runs);
   if (!values.length && binding.writeStrategy.allowEmpty) {
     for (const run of runs) run.text = "";
     list.items = [];
@@ -244,10 +278,13 @@ function executeSetList(
     if (!paragraph) throw new Error(`List paragraph source is missing: ${paragraphPath}`);
     for (const value of values.slice(runs.length).reverse()) {
       const clone = paragraph.cloneNode(true) as Element;
+      for (const lineBreak of elementsByLocalName(clone, "br")) {
+        lineBreak.parentNode?.removeChild(lineBreak);
+      }
       const texts = elementsByLocalName(clone, "t");
       if (!texts.length) throw new Error(`List paragraph has no text node: ${paragraphPath}`);
       texts[0]!.textContent = value;
-      for (const text of texts.slice(1)) text.textContent = "";
+      for (const text of texts.slice(1)) removeTextRun(text);
       addPatch(plan, {
         op: "insertAfter",
         partUri: anchor.source.partUri,
@@ -260,6 +297,40 @@ function executeSetList(
     id: list.items[index]?.id ?? `${list.id}:item:${randomUUID()}`,
     value,
   }));
+}
+
+function removePptxParagraphBreaks(
+  document: RichDocument<DocumentRoot>,
+  runs: TextRunNode[],
+): void {
+  if (document.format !== "pptx" || !document.nativeStore) return;
+  const plan = (document.patchPlan ??= createPatchPlan());
+  const processedParagraphs = new Set<string>();
+  for (const run of runs) {
+    if (!run.source?.xmlPath) continue;
+    const paragraphPath = parentElementPath(run.source.xmlPath, 2);
+    const key = `${run.source.partUri}\u001f${paragraphPath}`;
+    if (processedParagraphs.has(key)) continue;
+    processedParagraphs.add(key);
+    const part = document.nativeStore.parts[run.source.partUri];
+    const paragraph = part?.xml ? findByElementPath(parseXml(part.xml), paragraphPath) : undefined;
+    const breaks = paragraph ? elementsByLocalName(paragraph, "br") : [];
+    for (let index = breaks.length; index >= 1; index--) {
+      addPatch(plan, {
+        op: "remove",
+        partUri: run.source.partUri,
+        path: `${paragraphPath}/br[${index}]`,
+      });
+    }
+  }
+}
+
+function removeTextRun(text: Element): void {
+  let removable: Node = text;
+  if (text.parentNode && ["r", "fld", "br"].includes((text.parentNode as Element).localName)) {
+    removable = text.parentNode;
+  }
+  removable.parentNode?.removeChild(removable);
 }
 
 function insertPptxTextShape(
@@ -320,7 +391,7 @@ function appendCollectionItem(
   if (!prototype?.nativeXml || !location?.partUri || !location.xmlPath)
     throw new Error(`Collection prototype is incomplete: ${collection.id}`);
   const itemId = `${collection.id}.item.${randomUUID()}`;
-  const xml = instantiatePrototype(prototype.nativeXml, values, itemId, document.format);
+  const xml = instantiatePrototype(prototype, values, itemId, document.format);
   const patch: InsertAfterPatch = {
     op: "insertAfter",
     partUri: location.partUri,
@@ -332,7 +403,7 @@ function appendCollectionItem(
   const fields = fieldsFromValues(itemId, values);
   collection.items.push({ id: itemId, type: "fieldGroup", label: itemId, editable: false, fields });
   const map = runtimeItems.get(template) ?? new Map();
-  map.set(itemId, { patch, values, prototypeXml: prototype.nativeXml });
+  map.set(itemId, { patch, values, prototype });
   runtimeItems.set(template, map);
   return itemId;
 }
@@ -350,7 +421,7 @@ function updateCollectionItem(
   if (runtime) {
     runtime.values = { ...runtime.values, ...values };
     runtime.patch.xml = instantiatePrototype(
-      runtime.prototypeXml,
+      runtime.prototype,
       runtime.values,
       itemId,
       document.format,
@@ -408,11 +479,13 @@ function removeCollectionItem(
   collection.items.splice(index, 1);
 }
 function instantiatePrototype(
-  nativeXml: string,
+  prototype: NonNullable<TemplateBindingMap["prototypes"][string]>,
   values: Record<string, string | string[]>,
   itemId: string,
   format: "docx" | "pptx",
 ): string {
+  const nativeXml = prototype.nativeXml;
+  if (!nativeXml) throw new Error(`Prototype XML is missing: ${prototype.id}`);
   const wrapper = parseXml(
     `<rdt:root xmlns:rdt="urn:rdt" xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">${nativeXml}</rdt:root>`,
   );
@@ -423,6 +496,7 @@ function instantiatePrototype(
   ].find((node) => node?.nodeType === 1) as Element | undefined;
   if (!root) throw new Error("Prototype XML has no root element");
   if (format === "docx") {
+    let markerFields = 0;
     for (const sdt of [root, ...elementsByLocalName(root, "sdt")].filter(
       (element) => element.localName === "sdt",
     )) {
@@ -430,9 +504,17 @@ function instantiatePrototype(
       const raw = tag ? attr(tag, "val") : undefined;
       const marker = raw ? parseMarker(raw) : undefined;
       if (marker?.kind === "field") {
+        markerFields++;
         setElementTexts(sdt, valueText(values[marker.id]));
         tag!.setAttribute("w:val", `rdt:field:${itemId}.${marker.id}`);
       } else if (marker?.kind === "prototype") tag!.setAttribute("w:val", `rdt:group:${itemId}`);
+    }
+    if (!markerFields) {
+      const cells = elementsByLocalName(root, "tc");
+      for (const [key, binding] of Object.entries(prototype.fieldBindings)) {
+        const cell = binding.cellIndex === undefined ? undefined : cells[binding.cellIndex];
+        if (cell) setDocxCellText(cell, valueText(values[key]));
+      }
     }
   } else {
     let nextId = 100000 + Math.floor(Math.random() * 800000);
@@ -450,6 +532,29 @@ function instantiatePrototype(
     }
   }
   return root.toString();
+}
+
+function setDocxCellText(cell: Element, value: string): void {
+  const texts = elementsByLocalName(cell, "t");
+  if (texts.length) {
+    texts[0]!.textContent = value;
+    for (const text of texts.slice(1)) text.textContent = "";
+    return;
+  }
+  const paragraph = elementsByLocalName(cell, "p")[0];
+  if (!paragraph) return;
+  const owner = paragraph.ownerDocument;
+  const run = owner.createElementNS(
+    "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+    "w:r",
+  );
+  const text = owner.createElementNS(
+    "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+    "w:t",
+  );
+  text.appendChild(owner.createTextNode(value));
+  run.appendChild(text);
+  paragraph.appendChild(run);
 }
 function setElementTexts(element: Element, value: string) {
   const texts = elementsByLocalName(element, "t");

@@ -178,20 +178,64 @@ Copy [.env.example](./.env.example) to a local `.env` only if your runtime loads
 
 # Candidate PDF Ground Truth Pipeline
 
-Candidate resumes use an independent pipeline and do not change the existing template extractor. It reads every PDF in a folder (recursively in the manual command), extracts the PDF text layer page by page, stores both loss-auditable text items and plain text, then asks Gemini to map supported source facts to every editable template field. The LLM result still passes through the existing structured-output and preview validation chain; the command does not mutate or export the template.
+Candidate resumes use an independent ground-truth pipeline around the existing template extractor. It reads every PDF in a folder recursively, extracts the PDF text layer page by page, stores both loss-auditable text items and plain text, then asks Gemini to map supported source facts to every editable template field. The candidate PDF is treated only as a fact source; each target section receives the complete candidate text plus the template section context. The accepted operations are applied to a fresh copy of the template and exported as DOCX or PPTX.
 
 ```bash
 npm run build
 node --env-file=.env scripts/candidate-pipeline.mjs manual/candidates manual/input.docx manual/candidate-output
 ```
 
+The same command supports PPTX templates:
+
+```bash
+node --env-file=.env scripts/candidate-pipeline.mjs manual/candidates manual/input.pptx manual/candidate-output
+```
+
+DOCX table sections with headers but no populated rows are treated as editable collections. For
+example, an empty `Work experience` table can produce multiple `appendCollectionItem` operations.
+The extractor records each schema field's table-cell index, allowing cloned rows to preserve the
+template formatting while filling the correct cells.
+
+Before DOCX export, the pipeline removes redundant blank paragraphs and completely blank table
+rows. It always preserves the minimum paragraph structure required by Word inside retained cells.
+
+The candidate pipeline accepts an output only after OPC validation, RDT re-import validation,
+operation-content verification, whitespace checks, and blank-table-row checks. A rejected output
+is regenerated from the untouched template. The default limit is three attempts and can be changed
+with `CANDIDATE_OUTPUT_MAX_ATTEMPTS`. The accepted quality report and complete attempt history are
+stored in `candidate-field-plan.json`; an output file is written only after acceptance. Every retry
+starts from the untouched template, so a rejected attempt cannot leak mutations into the next one.
+
+```bash
+# Optional; defaults to 3.
+CANDIDATE_OUTPUT_MAX_ATTEMPTS=5 \
+  node --env-file=.env scripts/candidate-pipeline.mjs \
+  manual/candidates manual/input.docx manual/candidate-output
+```
+
 Outputs:
 
 - `candidate-ground-truth.json`: source hashes, page dimensions, every text item and its layout metadata, page text, and merged text.
 - `candidate-ground-truth.txt`: human-readable file/page-separated source text.
-- `candidate-field-plan.json`: for each editable template target, the operation (how to fill), value (what to fill), LLM metadata, and dry-run result.
+- `candidate-field-plan.json`: operations for every editable target, LLM metadata, dry-run result, final quality report, accepted-attempt number, and complete retry history.
 - `output.docx` or `output.pptx`: the atomically validated operations applied to a copy of the template.
 
 This phase supports PDFs with a real text layer. A page with no extractable text is rejected instead of being silently omitted. Image-only/scanned PDF OCR is intentionally not enabled yet.
 
 Gemini response bodies are automatically stored in `manual/llm-responses/` using UTC timestamp filenames. Each file contains only the model-returned body. Set `LLM_RESPONSE_DIR` to use another directory, or pass `responseLogDirectory: false` to `Gemini35FlashProvider` to disable recording for a specific provider instance.
+
+## Local files and Git
+
+Local secrets, candidate data, manual fixtures, generated Office files, LLM responses, QA renders,
+coverage data, test reports, and runtime logs are excluded by `.gitignore`. In particular, do not
+move real candidate resumes or API response logs outside the ignored `manual/`, `outputs/`, or
+`logs/` paths unless you intentionally want Git to see them.
+
+The TypeScript tests in `test/` remain tracked because they are project source. Generated test
+artifacts belong in `test-results/`, `coverage/`, `outputs/`, or `manual/`; those directories are
+ignored. Before pushing, verify the staged files:
+
+```bash
+git status --short
+git diff --cached --name-only
+```

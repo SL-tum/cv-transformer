@@ -37,6 +37,7 @@ export interface PrototypeFieldBinding {
   fieldId: string;
   markerId: string;
   relativeSourceNodeIds: string[];
+  cellIndex?: number;
 }
 export interface PrototypeBinding {
   id: string;

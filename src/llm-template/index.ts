@@ -12,6 +12,7 @@ export * from "./extraction/candidate-discovery.js";
 export * from "./extraction/structural-detector.js";
 export * from "./extraction/hybrid-extractor.js";
 export * from "./extraction/docx-table-extractor.js";
+export * from "./extraction/pptx-layout-capacity.js";
 export * from "./bindings/binding.js";
 export * from "./bindings/binding-map.js";
 export * from "./bindings/binding-validator.js";

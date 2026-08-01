@@ -5,9 +5,82 @@ import path from "node:path";
 import test from "node:test";
 import {
   loadCandidateGroundTruth,
+  evaluateOperationLayoutFit,
+  normalizeLlmTemplateOperation,
   recordLlmResponseBody,
+  runOutputQualityRetryLoop,
   saveCandidateGroundTruth,
 } from "../src/index.js";
+
+test("output quality loop retries rejected generations and accepts the first passing output", async () => {
+  const generated: number[] = [];
+  const result = await runOutputQualityRetryLoop(
+    async (attempt) => {
+      generated.push(attempt);
+      return attempt;
+    },
+    (attempt) => ({
+      valid: attempt === 3,
+      errors: attempt === 3 ? [] : [`attempt ${attempt} rejected`],
+      warnings: [],
+      checks: {
+        opcValid: attempt === 3,
+        rdtValid: attempt === 3,
+        operationContentPresent: attempt === 3,
+        whitespaceValid: true,
+        blankTableRows: 0,
+      },
+    }),
+    { maxAttempts: 3 },
+  );
+  assert.deepEqual(generated, [1, 2, 3]);
+  assert.equal(result.value, 3);
+  assert.equal(result.attempts, 3);
+  assert.deepEqual(
+    result.history.map((attempt) => attempt.valid),
+    [false, false, true],
+  );
+});
+
+test("LLM operation normalization removes blank lines before template execution", () => {
+  assert.deepEqual(
+    normalizeLlmTemplateOperation({
+      op: "setList",
+      targetId: "relevant-experience",
+      items: ["Role A  \r\n\r\nResponsibility A\v\vResult A  ", "Role B"],
+    }),
+    {
+      op: "setList",
+      targetId: "relevant-experience",
+      items: ["Role A\nResponsibility A\nResult A", "Role B"],
+    },
+  );
+});
+
+test("layout fit check detects content that exceeds a template section budget", () => {
+  const section = {
+    targetId: "summary",
+    operationType: "setText" as const,
+    layoutCapacity: {
+      widthPt: 200,
+      heightPt: 50,
+      fontSizePt: 10,
+      estimatedCharactersPerLine: 20,
+      estimatedMaxLines: 2,
+      recommendedCharacters: 34,
+      recommendedItems: 1,
+      sharedShapeTargets: 1,
+    },
+  };
+  const fit = evaluateOperationLayoutFit(section, {
+    op: "setText",
+    targetId: "summary",
+    value: "This content is deliberately long enough to require more than two rendered lines.",
+  });
+  assert.equal(fit.fits, false);
+  assert.ok(fit.estimatedLines > 2);
+  assert.match(fit.reasons.join(" "), /exceeds/);
+});
 
 test("LLM response recorder stores only the returned body in timestamped files", async () => {
   const folder = await mkdtemp(path.join(os.tmpdir(), "rdt-llm-response-"));

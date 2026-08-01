@@ -52,10 +52,12 @@ export interface CandidateFieldPlan {
   nodeType: string;
   status: "filled" | "missing";
   operation?: TemplateOperation;
+  operations?: TemplateOperation[];
 }
 
 export interface CandidateMappingResult {
   generation: LlmGenerationResult;
+  generations: LlmGenerationResult[];
   operations: TemplateOperation[];
   fieldPlan: CandidateFieldPlan[];
   missingTargetIds: string[];

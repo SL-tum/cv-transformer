@@ -24,6 +24,7 @@ import {
   validateOpcPackage,
   writeOpcPackage,
   addPptxShape,
+  applyXmlPatchPlan,
 } from "../src/index.js";
 
 const zip = (entries: Record<string, string | Uint8Array>) =>
@@ -313,4 +314,33 @@ test("Phase 3: complex unknown XML and opaque binary bytes survive semantic edit
   const output = unzipSync(exportDocx(document));
   assert.deepEqual(output["customXml/item1.xml"], input["customXml/item1.xml"]);
   assert.deepEqual(output["custom/opaque.bin"], input["custom/opaque.bin"]);
+});
+
+test("XML patch targets remain stable when earlier insertions shift sibling indexes", () => {
+  const pkg = loadOpcPackage(docxFixture());
+  addPart(pkg, {
+    preferredUri: "/word/sequence.xml",
+    contentType: "application/xml",
+    data: "<root><p>A</p><p>B</p><p>C</p><p>D</p></root>",
+  });
+  applyXmlPatchPlan(pkg, {
+    patches: [
+      {
+        op: "insertAfter",
+        partUri: "/word/sequence.xml",
+        path: "/root[1]/p[1]",
+        xml: "<p>X</p>",
+      },
+      {
+        op: "insertAfter",
+        partUri: "/word/sequence.xml",
+        path: "/root[1]/p[4]",
+        xml: "<p>Y</p>",
+      },
+    ],
+  });
+  assert.equal(
+    pkg.parts.get("/word/sequence.xml")?.xml,
+    "<root><p>A</p><p>X</p><p>B</p><p>C</p><p>D</p><p>Y</p></root>",
+  );
 });

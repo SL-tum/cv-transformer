@@ -20,6 +20,7 @@ import { discoverDocxCandidates, discoverPptxCandidates } from "./candidate-disc
 import { detectDocxStructure, detectPptxStructure } from "./structural-detector.js";
 import { mergeHybridExtraction } from "./hybrid-extractor.js";
 import { mergeDocxTableExtraction } from "./docx-table-extractor.js";
+import { applyPptxLayoutCapacities } from "./pptx-layout-capacity.js";
 
 export function extractDocxTemplate(
   document: RichDocument<FlowDocumentRoot>,
@@ -45,14 +46,17 @@ export function extractPptxTemplate(
 ): ExtractionResult {
   const markers = readPptxMarkers(document);
   const base = build(document, markers, options);
-  if ((options.mode ?? "hybrid") === "strict") return base;
+  if ((options.mode ?? "hybrid") === "strict") return applyPptxLayoutCapacities(document, base);
   const candidates = discoverPptxCandidates(document);
   const detection = detectPptxStructure(
     candidates,
     options.acceptConfidence,
     options.reviewConfidence,
   );
-  return mergeHybridExtraction(base, candidates, detection.decisions, markers, options);
+  return applyPptxLayoutCapacities(
+    document,
+    mergeHybridExtraction(base, candidates, detection.decisions, markers, options),
+  );
 }
 export function extractTemplate(
   document: RichDocument<FlowDocumentRoot | PresentationDocumentRoot>,

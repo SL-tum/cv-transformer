@@ -1,12 +1,9 @@
 import { readFileSync } from "node:fs";
 
 import { serializeTemplateForLlm } from "../llm-template/index.js";
-import type { LlmGenerationRequest } from "./provider.js";
+import type { LlmGenerationRequest, LlmPromptMessage } from "./provider.js";
 
-export interface PromptMessage {
-  role: "system" | "user";
-  content: string;
-}
+export type PromptMessage = LlmPromptMessage;
 
 export const DEFAULT_OPERATION_SYSTEM_PROMPT_PATH = new URL(
   "../../prompts/operation-system-prompt.txt",
