@@ -17,9 +17,18 @@ export interface Size {
 }
 
 export type ThemeColor =
-  | "dark1" | "dark2" | "light1" | "light2"
-  | "accent1" | "accent2" | "accent3" | "accent4" | "accent5" | "accent6"
-  | "hyperlink" | "followedHyperlink";
+  | "dark1"
+  | "dark2"
+  | "light1"
+  | "light2"
+  | "accent1"
+  | "accent2"
+  | "accent3"
+  | "accent4"
+  | "accent5"
+  | "accent6"
+  | "hyperlink"
+  | "followedHyperlink";
 
 export interface ColorTransform {
   type: "tint" | "shade" | "alpha" | "lumMod" | "lumOff" | "satMod";

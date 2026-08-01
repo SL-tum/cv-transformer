@@ -9,34 +9,291 @@ import type { TemplateMarker } from "../markers/marker.js";
 import { readDocxMarkers } from "../markers/docx-marker-reader.js";
 import { readPptxMarkers } from "../markers/pptx-marker-reader.js";
 import { indexRdtNodes } from "../markers/common.js";
-import type { CollectionNode, ContainerNode, ListNode, TemplateNode, TextNode } from "../model/template-node.js";
+import type {
+  CollectionNode,
+  ContainerNode,
+  ListNode,
+  TemplateNode,
+  TextNode,
+} from "../model/template-node.js";
+import { discoverDocxCandidates, discoverPptxCandidates } from "./candidate-discovery.js";
+import { detectDocxStructure, detectPptxStructure } from "./structural-detector.js";
+import { mergeHybridExtraction } from "./hybrid-extractor.js";
+import { mergeDocxTableExtraction } from "./docx-table-extractor.js";
 
-export function extractDocxTemplate(document: RichDocument<FlowDocumentRoot>, options: ExtractionOptions = {}): ExtractionResult { return build(document, readDocxMarkers(document), options); }
-export function extractPptxTemplate(document: RichDocument<PresentationDocumentRoot>, options: ExtractionOptions = {}): ExtractionResult { return build(document, readPptxMarkers(document), options); }
-export function extractTemplate(document: RichDocument<FlowDocumentRoot | PresentationDocumentRoot>, options: ExtractionOptions = {}): ExtractionResult { return document.root.type === "flowDocument" ? extractDocxTemplate(document as RichDocument<FlowDocumentRoot>, options) : extractPptxTemplate(document as RichDocument<PresentationDocumentRoot>, options); }
+export function extractDocxTemplate(
+  document: RichDocument<FlowDocumentRoot>,
+  options: ExtractionOptions = {},
+): ExtractionResult {
+  const markers = readDocxMarkers(document);
+  const base = build(document, markers, options);
+  if ((options.mode ?? "hybrid") === "strict") return base;
+  const candidates = discoverDocxCandidates(document);
+  const detection = detectDocxStructure(
+    candidates,
+    options.acceptConfidence,
+    options.reviewConfidence,
+  );
+  return mergeDocxTableExtraction(
+    document,
+    mergeHybridExtraction(base, candidates, detection.decisions, markers, options),
+  );
+}
+export function extractPptxTemplate(
+  document: RichDocument<PresentationDocumentRoot>,
+  options: ExtractionOptions = {},
+): ExtractionResult {
+  const markers = readPptxMarkers(document);
+  const base = build(document, markers, options);
+  if ((options.mode ?? "hybrid") === "strict") return base;
+  const candidates = discoverPptxCandidates(document);
+  const detection = detectPptxStructure(
+    candidates,
+    options.acceptConfidence,
+    options.reviewConfidence,
+  );
+  return mergeHybridExtraction(base, candidates, detection.decisions, markers, options);
+}
+export function extractTemplate(
+  document: RichDocument<FlowDocumentRoot | PresentationDocumentRoot>,
+  options: ExtractionOptions = {},
+): ExtractionResult {
+  return document.root.type === "flowDocument"
+    ? extractDocxTemplate(document as RichDocument<FlowDocumentRoot>, options)
+    : extractPptxTemplate(document as RichDocument<PresentationDocumentRoot>, options);
+}
 
-function build(document: RichDocument<FlowDocumentRoot | PresentationDocumentRoot>, markers: TemplateMarker[], options: ExtractionOptions): ExtractionResult {
-  const documentId = options.documentId ?? document.id; const revision = options.revision ?? 1; const warnings: string[] = []; const seen = new Set<string>();
-  for (const marker of markers) { if (seen.has(marker.id)) throw new Error(`Duplicate template marker id: ${marker.id}`); seen.add(marker.id); }
-  const nodeIndex = indexRdtNodes(document); const bindings: TemplateBindingMap = { documentId, templateRevision: revision, bindings: {}, prototypes: {} };
-  const prototypeMarkers = markers.filter((marker) => marker.kind === "prototype"); const collectionIds = markers.filter((marker) => marker.kind === "collection").map((marker) => marker.id); const instanceGroups = markers.filter((marker) => marker.kind === "group" && collectionIds.some((id) => marker.id.startsWith(`${id}.item.`))); const hiddenPaths = [...prototypeMarkers, ...instanceGroups].map((marker) => `${marker.partUri}\u001f${marker.xmlPath}`);
-  const visible = markers.filter((marker) => marker.kind !== "prototype" && !instanceGroups.includes(marker) && !hiddenPaths.some((path) => `${marker.partUri}\u001f${marker.xmlPath}`.startsWith(`${path}/`)));
+function build(
+  document: RichDocument<FlowDocumentRoot | PresentationDocumentRoot>,
+  markers: TemplateMarker[],
+  options: ExtractionOptions,
+): ExtractionResult {
+  const documentId = options.documentId ?? document.id;
+  const revision = options.revision ?? 1;
+  const warnings: string[] = [];
+  const seen = new Set<string>();
+  for (const marker of markers) {
+    if (seen.has(marker.id)) throw new Error(`Duplicate template marker id: ${marker.id}`);
+    seen.add(marker.id);
+  }
+  const nodeIndex = indexRdtNodes(document);
+  const bindings: TemplateBindingMap = {
+    documentId,
+    templateRevision: revision,
+    bindings: {},
+    prototypes: {},
+  };
+  const prototypeMarkers = markers.filter((marker) => marker.kind === "prototype");
+  const collectionIds = markers
+    .filter((marker) => marker.kind === "collection")
+    .map((marker) => marker.id);
+  const instanceGroups = markers.filter(
+    (marker) =>
+      marker.kind === "group" && collectionIds.some((id) => marker.id.startsWith(`${id}.item.`)),
+  );
+  const hiddenPaths = [...prototypeMarkers, ...instanceGroups].map(
+    (marker) => `${marker.partUri}\u001f${marker.xmlPath}`,
+  );
+  const visible = markers.filter(
+    (marker) =>
+      marker.kind !== "prototype" &&
+      !instanceGroups.includes(marker) &&
+      !hiddenPaths.some((path) =>
+        `${marker.partUri}\u001f${marker.xmlPath}`.startsWith(`${path}/`),
+      ),
+  );
   const entries: Array<{ marker: TemplateMarker; node: TemplateNode }> = [];
   for (const marker of visible) {
-    const configuration = options.markers?.[marker.id] ?? {}; const editable = marker.kind !== "fixed" && (configuration.editable ?? !["block", "group"].includes(marker.kind)); const value = marker.textNodeIds.map((id) => textOf(nodeIndex.byId.get(id))).join("");
-    const base = { id: marker.id, label: configuration.label ?? marker.id, editable, ...(configuration.required !== undefined ? { required: configuration.required } : {}), ...(configuration.constraints ? { constraints: configuration.constraints } : {}), metadata: { extractionSource: marker.source } };
+    const configuration = options.markers?.[marker.id] ?? {};
+    const editable =
+      marker.kind !== "fixed" &&
+      (configuration.editable ?? !["block", "group"].includes(marker.kind));
+    const value = marker.textNodeIds.map((id) => textOf(nodeIndex.byId.get(id))).join("");
+    const base = {
+      id: marker.id,
+      label: configuration.label ?? marker.id,
+      editable,
+      ...(configuration.required !== undefined ? { required: configuration.required } : {}),
+      ...(configuration.constraints ? { constraints: configuration.constraints } : {}),
+      metadata: { extractionSource: marker.source },
+    };
     let node: TemplateNode;
-    if (marker.kind === "list") node = { ...base, type: "list", items: listValues(marker, nodeIndex.byId).map((item, i) => ({ id: `${marker.id}:item:${i + 1}`, value: item })), repeatable: true } satisfies ListNode;
-    else if (marker.kind === "collection") { const prototypeId = configuration.prototypeId ?? prototypeMarkers.find((candidate) => options.markers?.[candidate.id]?.collectionId === marker.id)?.id; const groups = instanceGroups.filter((group) => group.id.startsWith(`${marker.id}.item.`)); const items = groups.map((group) => { const fieldMarkers = markers.filter((candidate) => candidate.kind === "field" && candidate.partUri === group.partUri && candidate.xmlPath.startsWith(`${group.xmlPath}/`)); bindings.bindings[group.id] = bindingFor(group, document.format); const fields = fieldMarkers.map((field) => { bindings.bindings[field.id] = bindingFor(field, document.format); const key = field.id.slice(group.id.length + 1); const fieldValue = field.textNodeIds.map((id) => textOf(nodeIndex.byId.get(id))).join(""); return { id: field.id, key, type: "text" as const, value: fieldValue, editable: true }; }); return { id: group.id, type: "fieldGroup" as const, label: group.id, editable: false, fields }; }); if (!prototypeId) { warnings.push(`Collection ${marker.id} has no prototype`); node = { ...base, type: "collection", repeatable: true, items, prototypeId: "" } satisfies CollectionNode; } else node = { ...base, type: "collection", repeatable: true, items, prototypeId, ...(configuration.constraints?.hard?.maxItems ? { maxItems: configuration.constraints.hard.maxItems } : {}) } satisfies CollectionNode; }
-    else if (marker.kind === "block" || marker.kind === "group") node = { ...base, type: "container", children: [] } satisfies ContainerNode;
+    if (marker.kind === "list")
+      node = {
+        ...base,
+        type: "list",
+        items: listValues(marker, nodeIndex.byId).map((item, i) => ({
+          id: `${marker.id}:item:${i + 1}`,
+          value: item,
+        })),
+        repeatable: true,
+      } satisfies ListNode;
+    else if (marker.kind === "collection") {
+      const prototypeId =
+        configuration.prototypeId ??
+        prototypeMarkers.find(
+          (candidate) => options.markers?.[candidate.id]?.collectionId === marker.id,
+        )?.id;
+      const groups = instanceGroups.filter((group) => group.id.startsWith(`${marker.id}.item.`));
+      const items = groups.map((group) => {
+        const fieldMarkers = markers.filter(
+          (candidate) =>
+            candidate.kind === "field" &&
+            candidate.partUri === group.partUri &&
+            candidate.xmlPath.startsWith(`${group.xmlPath}/`),
+        );
+        bindings.bindings[group.id] = bindingFor(group, document.format);
+        const fields = fieldMarkers.map((field) => {
+          bindings.bindings[field.id] = bindingFor(field, document.format);
+          const key = field.id.slice(group.id.length + 1);
+          const fieldValue = field.textNodeIds.map((id) => textOf(nodeIndex.byId.get(id))).join("");
+          return { id: field.id, key, type: "text" as const, value: fieldValue, editable: true };
+        });
+        return {
+          id: group.id,
+          type: "fieldGroup" as const,
+          label: group.id,
+          editable: false,
+          fields,
+        };
+      });
+      if (!prototypeId) {
+        warnings.push(`Collection ${marker.id} has no prototype`);
+        node = {
+          ...base,
+          type: "collection",
+          repeatable: true,
+          items,
+          prototypeId: "",
+        } satisfies CollectionNode;
+      } else
+        node = {
+          ...base,
+          type: "collection",
+          repeatable: true,
+          items,
+          prototypeId,
+          ...(configuration.constraints?.hard?.maxItems
+            ? { maxItems: configuration.constraints.hard.maxItems }
+            : {}),
+        } satisfies CollectionNode;
+    } else if (marker.kind === "block" || marker.kind === "group")
+      node = { ...base, type: "container", children: [] } satisfies ContainerNode;
     else node = { ...base, type: "text", value } satisfies TextNode;
-    entries.push({ marker, node }); bindings.bindings[marker.id] = bindingFor(marker, document.format);
+    entries.push({ marker, node });
+    bindings.bindings[marker.id] = bindingFor(marker, document.format);
   }
-  for (const marker of prototypeMarkers) { const configuration = options.markers?.[marker.id]; const collectionId = configuration?.collectionId ?? visible.find((candidate) => options.markers?.[candidate.id]?.prototypeId === marker.id)?.id; if (!collectionId) { warnings.push(`Prototype ${marker.id} is not assigned to a collection`); continue; } const nestedFields = markers.filter((candidate) => candidate.kind === "field" && candidate.partUri === marker.partUri && candidate.xmlPath.startsWith(`${marker.xmlPath}/`)); bindings.prototypes[marker.id] = { id: marker.id, collectionId, rootNodeIds: marker.rootNodeId ? [marker.rootNodeId] : [], cloneStrategy: document.format === "pptx" ? "deepCloneShapeGroup" : "deepCloneParagraphRange", insertionAnchorNodeId: marker.rootNodeId ?? marker.id, insertionPosition: "after", regenerateNodeIds: true, regenerateOfficeIds: true, preserveStyles: true, clearEditableContent: true, fieldBindings: Object.fromEntries(nestedFields.map((field) => [field.id, { fieldId: field.id, markerId: field.id, relativeSourceNodeIds: field.textNodeIds }])), locations: [{ nodeId: marker.rootNodeId ?? marker.id, partUri: marker.partUri, xmlPath: marker.xmlPath, role: "root" }], ...(marker.nativeXml ? { nativeXml: marker.nativeXml } : {}) }; }
-  const children: TemplateNode[] = []; for (const entry of entries) { const parents = entries.filter((candidate) => candidate.node.type === "container" && candidate.marker.partUri === entry.marker.partUri && entry.marker.xmlPath.startsWith(`${candidate.marker.xmlPath}/`)); const parent = parents.sort((a, b) => b.marker.xmlPath.length - a.marker.xmlPath.length)[0]; if (parent?.node.type === "container") parent.node.children.push(entry.node); else children.push(entry.node); }
-  const root: ContainerNode = { id: "root", type: "container", label: "Document", editable: false, children };
-  return { template: { documentId, revision, sourceFormat: document.format, root }, bindings, warnings };
+  for (const marker of prototypeMarkers) {
+    const configuration = options.markers?.[marker.id];
+    const collectionId =
+      configuration?.collectionId ??
+      visible.find((candidate) => options.markers?.[candidate.id]?.prototypeId === marker.id)?.id;
+    if (!collectionId) {
+      warnings.push(`Prototype ${marker.id} is not assigned to a collection`);
+      continue;
+    }
+    const nestedFields = markers.filter(
+      (candidate) =>
+        candidate.kind === "field" &&
+        candidate.partUri === marker.partUri &&
+        candidate.xmlPath.startsWith(`${marker.xmlPath}/`),
+    );
+    bindings.prototypes[marker.id] = {
+      id: marker.id,
+      collectionId,
+      rootNodeIds: marker.rootNodeId ? [marker.rootNodeId] : [],
+      cloneStrategy: document.format === "pptx" ? "deepCloneShapeGroup" : "deepCloneParagraphRange",
+      insertionAnchorNodeId: marker.rootNodeId ?? marker.id,
+      insertionPosition: "after",
+      regenerateNodeIds: true,
+      regenerateOfficeIds: true,
+      preserveStyles: true,
+      clearEditableContent: true,
+      fieldBindings: Object.fromEntries(
+        nestedFields.map((field) => [
+          field.id,
+          { fieldId: field.id, markerId: field.id, relativeSourceNodeIds: field.textNodeIds },
+        ]),
+      ),
+      locations: [
+        {
+          nodeId: marker.rootNodeId ?? marker.id,
+          partUri: marker.partUri,
+          xmlPath: marker.xmlPath,
+          role: "root",
+        },
+      ],
+      ...(marker.nativeXml ? { nativeXml: marker.nativeXml } : {}),
+    };
+  }
+  const children: TemplateNode[] = [];
+  for (const entry of entries) {
+    const parents = entries.filter(
+      (candidate) =>
+        candidate.node.type === "container" &&
+        candidate.marker.partUri === entry.marker.partUri &&
+        entry.marker.xmlPath.startsWith(`${candidate.marker.xmlPath}/`),
+    );
+    const parent = parents.sort((a, b) => b.marker.xmlPath.length - a.marker.xmlPath.length)[0];
+    if (parent?.node.type === "container") parent.node.children.push(entry.node);
+    else children.push(entry.node);
+  }
+  const root: ContainerNode = {
+    id: "root",
+    type: "container",
+    label: "Document",
+    editable: false,
+    children,
+  };
+  return {
+    template: { documentId, revision, sourceFormat: document.format, root },
+    bindings,
+    warnings,
+  };
 }
-function bindingFor(marker: TemplateMarker, format: "docx" | "pptx"): TemplateBinding { return { templateNodeId: marker.id, sourceNodeIds: [...new Set([...(marker.rootNodeId ? [marker.rootNodeId] : []), ...marker.textNodeIds])], sourceFormat: format, representation: marker.kind === "list" ? "paragraphList" : format === "pptx" ? "shapeText" : marker.textNodeIds.length > 1 ? "joinedRuns" : "plainText", readStrategy: marker.kind === "list" ? { type: "collectParagraphs" } : { type: "collectText" }, writeStrategy: marker.kind === "list" ? { type: "replaceParagraphList" } : format === "pptx" ? { type: "replaceShapeText" } : { type: "replaceTextPreservingRuns" }, formatStrategy: { type: "preserveExisting" }, locations: [{ nodeId: marker.rootNodeId ?? marker.id, partUri: marker.partUri, xmlPath: marker.xmlPath, role: "root" }, ...marker.textPaths.map((path, index) => ({ nodeId: marker.textNodeIds[index] ?? `${marker.id}:text:${index}`, partUri: marker.partUri, xmlPath: path, role: "text" as const }))] }; }
-function textOf(node?: BaseNode): string { return node?.type === "textRun" && "text" in node ? String(node.text) : ""; }
-function listValues(marker: TemplateMarker, nodes: Map<string, BaseNode>): string[] { const values = marker.textNodeIds.map((id) => textOf(nodes.get(id))).filter(Boolean); return values.flatMap((value) => value.split(/\r?\n/)).filter(Boolean); }
+function bindingFor(marker: TemplateMarker, format: "docx" | "pptx"): TemplateBinding {
+  return {
+    templateNodeId: marker.id,
+    sourceNodeIds: [
+      ...new Set([...(marker.rootNodeId ? [marker.rootNodeId] : []), ...marker.textNodeIds]),
+    ],
+    sourceFormat: format,
+    representation:
+      marker.kind === "list"
+        ? "paragraphList"
+        : format === "pptx"
+          ? "shapeText"
+          : marker.textNodeIds.length > 1
+            ? "joinedRuns"
+            : "plainText",
+    readStrategy: marker.kind === "list" ? { type: "collectParagraphs" } : { type: "collectText" },
+    writeStrategy:
+      marker.kind === "list"
+        ? { type: "replaceParagraphList" }
+        : format === "pptx"
+          ? { type: "replaceShapeText" }
+          : { type: "replaceTextPreservingRuns" },
+    formatStrategy: { type: "preserveExisting" },
+    locations: [
+      {
+        nodeId: marker.rootNodeId ?? marker.id,
+        partUri: marker.partUri,
+        xmlPath: marker.xmlPath,
+        role: "root",
+      },
+      ...marker.textPaths.map((path, index) => ({
+        nodeId: marker.textNodeIds[index] ?? `${marker.id}:text:${index}`,
+        partUri: marker.partUri,
+        xmlPath: path,
+        role: "text" as const,
+      })),
+    ],
+  };
+}
+function textOf(node?: BaseNode): string {
+  return node?.type === "textRun" && "text" in node ? String(node.text) : "";
+}
+function listValues(marker: TemplateMarker, nodes: Map<string, BaseNode>): string[] {
+  const values = marker.textNodeIds.map((id) => textOf(nodes.get(id))).filter(Boolean);
+  return values.flatMap((value) => value.split(/\r?\n/)).filter(Boolean);
+}

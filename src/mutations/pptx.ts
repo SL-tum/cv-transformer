@@ -1,16 +1,116 @@
 import { randomUUID } from "node:crypto";
 import type { RichDocument } from "../model/core/document.js";
 import type { ShapeNode } from "../model/drawing/index.js";
-import type { PresentationDocumentRoot, SlideElementNode, SlideNode } from "../model/presentation/index.js";
+import type {
+  PresentationDocumentRoot,
+  SlideElementNode,
+  SlideNode,
+} from "../model/presentation/index.js";
 import { addPatch, createPatchPlan } from "../ooxml/patch-plan.js";
 
-const plan = (document: RichDocument<PresentationDocumentRoot>) => document.patchPlan ??= createPatchPlan();
-export function addPptxShape(document: RichDocument<PresentationDocumentRoot>, slide: SlideNode, text: string, index = slide.shapes.length): ShapeNode { const shape: ShapeNode = { id: `shape_${randomUUID()}`, type: "shape", geometry: { preset: "rect" }, transform: {}, textBody: { paragraphs: [{ id: `p_${randomUUID()}`, type: "paragraph", properties: {}, runs: [{ id: `text_${randomUUID()}`, type: "textRun", text, properties: {} }] }] } }; const anchor = slide.shapes[index] ?? slide.shapes[index - 1]; if (!anchor?.source?.xmlPath) throw new Error("Adding a shape requires a source-mapped adjacent shape"); const nativeId = nextNonVisualId(document.nativeStore?.parts[anchor.source.partUri]?.xml); addPatch(plan(document), { op: index < slide.shapes.length ? "insertBefore" : "insertAfter", partUri: anchor.source.partUri, path: anchor.source.xmlPath, xml: shapeXml(shape, nativeId) }); slide.shapes.splice(index, 0, shape); return shape; }
-export function deletePptxShape(document: RichDocument<PresentationDocumentRoot>, slide: SlideNode, shape: SlideElementNode): void { const index = slide.shapes.indexOf(shape); if (index < 0) throw new Error("Shape is not on the slide"); if (!shape.source?.xmlPath) throw new Error("Deleting requires a source-mapped shape"); addPatch(plan(document), { op: "remove", partUri: shape.source.partUri, path: shape.source.xmlPath }); slide.shapes.splice(index, 1); }
-export function duplicatePptxShape(document: RichDocument<PresentationDocumentRoot>, slide: SlideNode, shape: SlideElementNode): SlideElementNode { if (!shape.source?.xmlPath || !document.nativeStore) throw new Error("Duplicating requires a source-mapped shape and NativeStore"); const part = document.nativeStore.parts[shape.source.partUri]; if (!part?.xml) throw new Error("Shape source XML is missing"); const copy = structuredClone(shape); copy.id = `${shape.type}_${randomUUID()}`; delete copy.source; addPatch(plan(document), { op: "insertAfter", partUri: shape.source.partUri, path: shape.source.xmlPath, xml: shape.native?.rawXml ?? serializeSourceElement(part.xml, shape.source.xmlPath) }); slide.shapes.splice(slide.shapes.indexOf(shape) + 1, 0, copy); return copy; }
+const plan = (document: RichDocument<PresentationDocumentRoot>) =>
+  (document.patchPlan ??= createPatchPlan());
+export function addPptxShape(
+  document: RichDocument<PresentationDocumentRoot>,
+  slide: SlideNode,
+  text: string,
+  index = slide.shapes.length,
+): ShapeNode {
+  const shape: ShapeNode = {
+    id: `shape_${randomUUID()}`,
+    type: "shape",
+    geometry: { preset: "rect" },
+    transform: {},
+    textBody: {
+      paragraphs: [
+        {
+          id: `p_${randomUUID()}`,
+          type: "paragraph",
+          properties: {},
+          runs: [{ id: `text_${randomUUID()}`, type: "textRun", text, properties: {} }],
+        },
+      ],
+    },
+  };
+  const anchor = slide.shapes[index] ?? slide.shapes[index - 1];
+  if (!anchor?.source?.xmlPath)
+    throw new Error("Adding a shape requires a source-mapped adjacent shape");
+  const nativeId = nextNonVisualId(document.nativeStore?.parts[anchor.source.partUri]?.xml);
+  addPatch(plan(document), {
+    op: index < slide.shapes.length ? "insertBefore" : "insertAfter",
+    partUri: anchor.source.partUri,
+    path: anchor.source.xmlPath,
+    xml: shapeXml(shape, nativeId),
+  });
+  slide.shapes.splice(index, 0, shape);
+  return shape;
+}
+export function deletePptxShape(
+  document: RichDocument<PresentationDocumentRoot>,
+  slide: SlideNode,
+  shape: SlideElementNode,
+): void {
+  const index = slide.shapes.indexOf(shape);
+  if (index < 0) throw new Error("Shape is not on the slide");
+  if (!shape.source?.xmlPath) throw new Error("Deleting requires a source-mapped shape");
+  addPatch(plan(document), {
+    op: "remove",
+    partUri: shape.source.partUri,
+    path: shape.source.xmlPath,
+  });
+  slide.shapes.splice(index, 1);
+}
+export function duplicatePptxShape(
+  document: RichDocument<PresentationDocumentRoot>,
+  slide: SlideNode,
+  shape: SlideElementNode,
+): SlideElementNode {
+  if (!shape.source?.xmlPath || !document.nativeStore)
+    throw new Error("Duplicating requires a source-mapped shape and NativeStore");
+  const part = document.nativeStore.parts[shape.source.partUri];
+  if (!part?.xml) throw new Error("Shape source XML is missing");
+  const copy = structuredClone(shape);
+  copy.id = `${shape.type}_${randomUUID()}`;
+  delete copy.source;
+  addPatch(plan(document), {
+    op: "insertAfter",
+    partUri: shape.source.partUri,
+    path: shape.source.xmlPath,
+    xml: shape.native?.rawXml ?? serializeSourceElement(part.xml, shape.source.xmlPath),
+  });
+  slide.shapes.splice(slide.shapes.indexOf(shape) + 1, 0, copy);
+  return copy;
+}
 
 import { findByElementPath, parseXml } from "../ooxml/xml.js";
-function serializeSourceElement(xml: string, path: string): string { const document = parseXml(xml); const element = findByElementPath(document, path); if (!element) throw new Error(`Shape XML not found: ${path}`); const clone = element.cloneNode(true) as Element; const properties = clone.getElementsByTagName("p:cNvPr")[0] ?? clone.getElementsByTagName("cNvPr")[0]; if (properties) { properties.setAttribute("id", String(nextNonVisualId(xml))); properties.setAttribute("name", `${properties.getAttribute("name") ?? "Shape"} Copy`); } return clone.toString(); }
-const escapeXml = (value: string) => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
-function shapeXml(shape: ShapeNode, nativeId: number): string { const text = shape.textBody?.paragraphs.flatMap((p) => p.runs).filter((r) => r.type === "textRun").map((r) => r.text).join("") ?? ""; return `<p:sp><p:nvSpPr><p:cNvPr id="${nativeId}" name="RDT Shape"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:prstGeom prst="${shape.geometry.preset ?? "rect"}"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>${escapeXml(text)}</a:t></a:r></a:p></p:txBody></p:sp>`; }
-function nextNonVisualId(xml?: string): number { if (!xml) return 2; const matches = [...xml.matchAll(/<p:cNvPr\b[^>]*\bid="(\d+)"/g)].map((match) => Number(match[1])); return Math.max(1, ...matches) + 1; }
+function serializeSourceElement(xml: string, path: string): string {
+  const document = parseXml(xml);
+  const element = findByElementPath(document, path);
+  if (!element) throw new Error(`Shape XML not found: ${path}`);
+  const clone = element.cloneNode(true) as Element;
+  const properties =
+    clone.getElementsByTagName("p:cNvPr")[0] ?? clone.getElementsByTagName("cNvPr")[0];
+  if (properties) {
+    properties.setAttribute("id", String(nextNonVisualId(xml)));
+    properties.setAttribute("name", `${properties.getAttribute("name") ?? "Shape"} Copy`);
+  }
+  return clone.toString();
+}
+const escapeXml = (value: string) =>
+  value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+function shapeXml(shape: ShapeNode, nativeId: number): string {
+  const text =
+    shape.textBody?.paragraphs
+      .flatMap((p) => p.runs)
+      .filter((r) => r.type === "textRun")
+      .map((r) => r.text)
+      .join("") ?? "";
+  return `<p:sp><p:nvSpPr><p:cNvPr id="${nativeId}" name="RDT Shape"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:prstGeom prst="${shape.geometry.preset ?? "rect"}"><a:avLst/></a:prstGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>${escapeXml(text)}</a:t></a:r></a:p></p:txBody></p:sp>`;
+}
+function nextNonVisualId(xml?: string): number {
+  if (!xml) return 2;
+  const matches = [...xml.matchAll(/<p:cNvPr\b[^>]*\bid="(\d+)"/g)].map((match) =>
+    Number(match[1]),
+  );
+  return Math.max(1, ...matches) + 1;
+}

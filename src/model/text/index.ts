@@ -1,7 +1,11 @@
 import type { BaseNode } from "../core/node.js";
 import type { Color, Length } from "../core/primitives.js";
 
-export interface FontReference { family?: string; theme?: string; fallback?: string[] }
+export interface FontReference {
+  family?: string;
+  theme?: string;
+  fallback?: string[];
+}
 export type UnderlineStyle = "none" | "single" | "double" | "dotted" | "dash" | "wave";
 
 export interface RunProperties {
@@ -26,16 +30,42 @@ export interface RunProperties {
   textEffects?: Record<string, unknown>;
 }
 
-export interface TextRunNode extends BaseNode<"textRun"> { text: string; properties: RunProperties }
-export interface BreakNode extends BaseNode<"break"> { kind: "line" | "page" | "column" }
+export interface TextRunNode extends BaseNode<"textRun"> {
+  text: string;
+  properties: RunProperties;
+}
+export interface BreakNode extends BaseNode<"break"> {
+  kind: "line" | "page" | "column";
+}
 export interface TabNode extends BaseNode<"tab"> {}
-export interface HyperlinkNode extends BaseNode<"hyperlink"> { target?: string; relationshipId?: string; runs: InlineNode[] }
-export interface FieldNode extends BaseNode<"field"> { instruction: string; result?: InlineNode[]; complex?: boolean }
-export interface InlineImageNode extends BaseNode<"inlineImage"> { resourceId: string }
+export interface HyperlinkNode extends BaseNode<"hyperlink"> {
+  target?: string;
+  relationshipId?: string;
+  runs: InlineNode[];
+}
+export interface FieldNode extends BaseNode<"field"> {
+  instruction: string;
+  result?: InlineNode[];
+  complex?: boolean;
+}
+export interface InlineImageNode extends BaseNode<"inlineImage"> {
+  resourceId: string;
+}
 export interface MathNode extends BaseNode<"math"> {}
-export interface BookmarkNode extends BaseNode<"bookmark"> { name: string; action: "start" | "end" }
+export interface BookmarkNode extends BaseNode<"bookmark"> {
+  name: string;
+  action: "start" | "end";
+}
 
-export type InlineNode = TextRunNode | BreakNode | TabNode | HyperlinkNode | FieldNode | InlineImageNode | MathNode | BookmarkNode;
+export type InlineNode =
+  | TextRunNode
+  | BreakNode
+  | TabNode
+  | HyperlinkNode
+  | FieldNode
+  | InlineImageNode
+  | MathNode
+  | BookmarkNode;
 
 export interface ParagraphProperties {
   styleId?: string;
@@ -49,6 +79,17 @@ export interface ParagraphProperties {
   native?: Record<string, unknown>;
 }
 
-export interface ParagraphNode extends BaseNode<"paragraph"> { runs: InlineNode[]; properties: ParagraphProperties }
-export interface TextBodyProperties { verticalAnchor?: string; wrapping?: string; columns?: number; native?: Record<string, unknown> }
-export interface TextBody { paragraphs: ParagraphNode[]; bodyProperties?: TextBodyProperties }
+export interface ParagraphNode extends BaseNode<"paragraph"> {
+  runs: InlineNode[];
+  properties: ParagraphProperties;
+}
+export interface TextBodyProperties {
+  verticalAnchor?: string;
+  wrapping?: string;
+  columns?: number;
+  native?: Record<string, unknown>;
+}
+export interface TextBody {
+  paragraphs: ParagraphNode[];
+  bodyProperties?: TextBodyProperties;
+}

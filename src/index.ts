@@ -25,3 +25,4 @@ export * from "./mutations/pptx.js";
 export * from "./style-resolution/index.js";
 export * from "./llm-template/index.js";
 export * from "./llm-integration/index.js";
+export * from "./candidate-pipeline/index.js";
